@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -25,11 +24,11 @@ type Client struct {
 	EndTime    time.Time
 }
 
-func NewClient() *Client {
+func NewClient(i int32) *Client {
 	client := &Client{
-		nodeId:     ClientNode.nodeID,
-		url:        ClientNode.url,
-		keypair:    KeypairMap[ClientNode.nodeID],
+		nodeId:     ClientNode[i].nodeID,
+		url:        ClientNode[i].url,
+		keypair:    ClientKeypairMap[ClientNode[i].nodeID],
 		knownNodes: KnownNodes,
 		request:    nil,
 		replyLog:   make(map[int]*ReplyMsg),
@@ -77,22 +76,31 @@ func (c *Client) sendRequest() {
 	}
 	msg := buffer.String()
 	req := Request{
-		msg,
-		hex.EncodeToString(generateDigest(msg)),
+		Message: msg,
+		Digest:  hex.EncodeToString(generateDigest(msg)),
 	}
 	reqmsg := &RequestMsg{
-		"solve",
-		int(time.Now().Unix()),
-		c.nodeId,
-		req,
+		Operation: "solve",
+		Timestamp: int(time.Now().Unix()),
+		ClientID:  c.nodeId,
+		CRequest:  req,
 	}
 	sig, err := c.signMessage(reqmsg)
 	if err != nil {
 		fmt.Printf("%v\n", err)
 	}
-	logBroadcastMsg(hRequest, reqmsg)
+	//logBroadcastMsg(hRequest, reqmsg)
+	data := &NetMsg{
+		Header:           hRequest,
+		RequestMsg:       reqmsg,
+		Signature:        sig,
+		ClientNodePubkey: c.keypair.pubkey,
+		ClientUrl:        c.url,
+	}
+	marshalMsg, _ := json.Marshal(data)
 	c.StartTime = time.Now()
-	send(ComposeMsg(hRequest, reqmsg, sig), c.findPrimaryNode().url)
+	Send(marshalMsg, c.findPrimaryNode().url)
+	//Send(ComposeMsg(hRequest, reqmsg, sig), c.findPrimaryNode().url)
 	c.request = reqmsg
 }
 
@@ -103,7 +111,7 @@ func (c *Client) handleReply(payload []byte) bool {
 		fmt.Printf("error happened:%v", err)
 		return false
 	}
-	logHandleMsg(hReply, replyMsg, replyMsg.NodeID)
+	//logHandleMsg(hReply, replyMsg, replyMsg.NodeID)
 	c.mutex.Lock()
 	c.replyLog[replyMsg.NodeID] = &replyMsg
 	rlen := len(c.replyLog)

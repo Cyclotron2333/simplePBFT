@@ -1,9 +1,11 @@
 package main
 
 import (
+	jsoniter "github.com/json-iterator/go"
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -14,6 +16,12 @@ const (
 )
 
 var Clients []*Client
+
+var json jsoniter.API
+
+func init() {
+	json = jsoniter.ConfigCompatibleWithStandardLibrary
+}
 
 func main() {
 	//app := &cli.App{
@@ -44,8 +52,18 @@ func main() {
 	defer logFile.Close() //确保文件在该函数执行完以后关闭
 
 	Clients := make([]*Client, ClientCount)
+	wg := sync.WaitGroup{}
 	for i := 0; i < ClientCount; i++ {
-		Clients[i] = initClient()
+		wg.Add(1)
+		go func(i int32) {
+			defer wg.Done()
+			client := NewClient(i)
+			client.Start()
+			Clients[i] = client
+		}(int32(i))
+	}
+	wg.Wait()
+	for i := 0; i < ClientCount; i++ {
 		time := Clients[i].EndTime.UnixNano() - Clients[i].StartTime.UnixNano()
 		debugLog.Printf("time consume : %v", float64(time)/1000000)
 	}
@@ -54,10 +72,4 @@ func main() {
 	//go func() {
 	//	<-gocron.Start()
 	//}()
-}
-
-func initClient() *Client {
-	client := NewClient()
-	client.Start()
-	return client
 }

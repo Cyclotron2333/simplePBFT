@@ -1,12 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rsa"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"sync"
 	"time"
 )
@@ -16,7 +12,6 @@ const ViewID = 0
 type Node struct {
 	NodeID      int
 	knownNodes  []*KnownNode
-	clientNode  *KnownNode
 	sequenceID  int
 	View        int
 	msgQueue    chan []byte
@@ -42,11 +37,10 @@ func NewNode(nodeID int) *Node {
 	return &Node{
 		nodeID,
 		KnownNodes,
-		ClientNode,
 		0,
 		ViewID,
 		make(chan []byte),
-		KeypairMap[nodeID],
+		KnownKeypairMap[nodeID],
 		&MsgLog{
 			make(map[string]map[int]bool),
 			make(map[string]map[int]bool),
@@ -71,29 +65,25 @@ func (node *Node) Start() {
 func (node *Node) handleMsg() {
 	for {
 		msg := <-node.msgQueue
-		header, payload, sign := SplitMsg(msg)
-		switch header {
+		netMsg := NetMsg{}
+		json.Unmarshal(msg, &netMsg)
+		//header, payload, sign := SplitMsg(msg)
+		switch netMsg.Header {
 		case hRequest:
-			node.handleRequest(payload, sign)
+			node.handleRequest(netMsg.RequestMsg, netMsg.Signature, netMsg.ClientNodePubkey, netMsg.ClientUrl)
 		case hPrePrepare:
-			node.handlePrePrepare(payload, sign)
+			node.handlePrePrepare(netMsg.PrePrepareMsg, netMsg.Signature, netMsg.ClientUrl)
 		case hPrepare:
-			node.handlePrepare(payload, sign)
+			node.handlePrepare(netMsg.PrepareMsg, netMsg.Signature, netMsg.ClientUrl)
 		case hCommit:
-			node.handleCommit(payload, sign)
+			node.handleCommit(netMsg.CommitMsg, netMsg.Signature, netMsg.ClientUrl)
 		}
 	}
 }
 
-func (node *Node) handleRequest(payload []byte, sig []byte) {
-	var request RequestMsg
+func (node *Node) handleRequest(request *RequestMsg, sig []byte, clientNodePubkey *rsa.PublicKey, clientNodeUrl string) {
 	var prePrepareMsg PrePrepareMsg
-	err := json.Unmarshal(payload, &request)
-	if err != nil {
-		fmt.Printf("error happened:%v", err)
-		return
-	}
-	logHandleMsg(hRequest, request, request.ClientID)
+	//logHandleMsg(hRequest, request, request.ClientID)
 	// verify request's digest
 	vdig := verifyDigest(request.CRequest.Message, request.CRequest.Digest)
 	if vdig == false {
@@ -101,20 +91,20 @@ func (node *Node) handleRequest(payload []byte, sig []byte) {
 		return
 	}
 	//verigy request's signature
-	_, err = verifySignatrue(request, sig, node.clientNode.pubkey)
+	_, err := verifySignatrue(request, sig, clientNodePubkey)
 	if err != nil {
 		fmt.Printf("verify signature failed:%v\n", err)
 		return
 	}
 	node.mutex.Lock()
-	node.requestPool[request.CRequest.Digest] = &request
+	node.requestPool[request.CRequest.Digest] = request
 	seqID := node.getSequenceID()
 	node.mutex.Unlock()
 	prePrepareMsg = PrePrepareMsg{
-		request,
-		request.CRequest.Digest,
-		ViewID,
-		seqID,
+		Request:    *request,
+		Digest:     request.CRequest.Digest,
+		ViewID:     ViewID,
+		SequenceID: seqID,
 	}
 	//sign prePrepareMsg
 	msgSig, err := node.signMessage(prePrepareMsg)
@@ -122,7 +112,13 @@ func (node *Node) handleRequest(payload []byte, sig []byte) {
 		fmt.Printf("%v\n", err)
 		return
 	}
-	msg := ComposeMsg(hPrePrepare, prePrepareMsg, msgSig)
+	data := &NetMsg{
+		Header:        hPrePrepare,
+		PrePrepareMsg: &prePrepareMsg,
+		Signature:     msgSig,
+		ClientUrl:     clientNodeUrl,
+	}
+	marshalMsg, _ := json.Marshal(data)
 	node.mutex.Lock()
 	// put preprepare msg into log
 	if node.msgLog.preprepareLog[prePrepareMsg.Digest] == nil {
@@ -130,26 +126,20 @@ func (node *Node) handleRequest(payload []byte, sig []byte) {
 	}
 	node.msgLog.preprepareLog[prePrepareMsg.Digest][node.NodeID] = true
 	node.mutex.Unlock()
-	logBroadcastMsg(hPrePrepare, prePrepareMsg)
-	node.broadcast(msg)
+	//logBroadcastMsg(hPrePrepare, prePrepareMsg)
+	node.broadcast(marshalMsg)
 }
 
-func (node *Node) handlePrePrepare(payload []byte, sig []byte) {
-	var prePrepareMsg PrePrepareMsg
-	err := json.Unmarshal(payload, &prePrepareMsg)
-	if err != nil {
-		fmt.Printf("error happened:%v", err)
-		return
-	}
+func (node *Node) handlePrePrepare(prePrepareMsg *PrePrepareMsg, sig []byte, clientNodeUrl string) {
 	pnodeId := node.findPrimaryNode()
-	logHandleMsg(hPrePrepare, prePrepareMsg, pnodeId)
+	//logHandleMsg(hPrePrepare, prePrepareMsg, pnodeId)
 	msgPubkey := node.findNodePubkey(pnodeId)
 	if msgPubkey == nil {
 		fmt.Println("can't find primary node's public key")
 		return
 	}
 	// verify msg's signature
-	_, err = verifySignatrue(prePrepareMsg, sig, msgPubkey)
+	_, err := verifySignatrue(prePrepareMsg, sig, msgPubkey)
 	if err != nil {
 		fmt.Printf("verify signature failed:%v\n", err)
 		return
@@ -187,7 +177,13 @@ func (node *Node) handlePrePrepare(payload []byte, sig []byte) {
 		fmt.Printf("%v\n", err)
 		return
 	}
-	sendMsg := ComposeMsg(hPrepare, prepareMsg, msgSig)
+	data := &NetMsg{
+		Header:     hPrepare,
+		PrepareMsg: &prepareMsg,
+		Signature:  msgSig,
+		ClientUrl:  clientNodeUrl,
+	}
+	marshalMsg, _ := json.Marshal(data)
 	node.mutex.Lock()
 	// put prepare msg into log
 	if node.msgLog.prepareLog[prepareMsg.Digest] == nil {
@@ -195,21 +191,15 @@ func (node *Node) handlePrePrepare(payload []byte, sig []byte) {
 	}
 	node.msgLog.prepareLog[prepareMsg.Digest][node.NodeID] = true
 	node.mutex.Unlock()
-	logBroadcastMsg(hPrepare, prepareMsg)
-	node.broadcast(sendMsg)
+	//logBroadcastMsg(hPrepare, prepareMsg)
+	node.broadcast(marshalMsg)
 }
 
-func (node *Node) handlePrepare(payload []byte, sig []byte) {
-	var prepareMsg PrepareMsg
-	err := json.Unmarshal(payload, &prepareMsg)
-	if err != nil {
-		fmt.Printf("error happened:%v", err)
-		return
-	}
-	logHandleMsg(hPrepare, prepareMsg, prepareMsg.NodeID)
+func (node *Node) handlePrepare(prepareMsg *PrepareMsg, sig []byte, clientNodeUrl string) {
+	//logHandleMsg(hPrepare, prepareMsg, prepareMsg.NodeID)
 	// verify prepareMsg
 	pubkey := node.findNodePubkey(prepareMsg.NodeID)
-	_, err = verifySignatrue(prepareMsg, sig, pubkey)
+	_, err := verifySignatrue(prepareMsg, sig, pubkey)
 	if err != nil {
 		fmt.Printf("verify signature failed:%v\n", err)
 		return
@@ -242,14 +232,14 @@ func (node *Node) handlePrepare(payload []byte, sig []byte) {
 		return
 	}
 	if sum >= limit {
-		// if already send commit msg, then do nothing
+		// if already Send commit msg, then do nothing
 		node.mutex.Lock()
 		exist, _ := node.msgLog.commitLog[prepareMsg.Digest][node.NodeID]
 		node.mutex.Unlock()
 		if exist != false {
 			return
 		}
-		//send commit msg
+		//Send commit msg
 		commitMsg := CommitMsg{
 			prepareMsg.Digest,
 			prepareMsg.ViewID,
@@ -260,7 +250,13 @@ func (node *Node) handlePrepare(payload []byte, sig []byte) {
 		if err != nil {
 			fmt.Printf("sign message happened error:%v\n", err)
 		}
-		sendMsg := ComposeMsg(hCommit, commitMsg, sig)
+		data := &NetMsg{
+			Header:    hCommit,
+			CommitMsg: &commitMsg,
+			Signature: sig,
+			ClientUrl: clientNodeUrl,
+		}
+		marshalMsg, _ := json.Marshal(data)
 		// put commit msg to log
 		node.mutex.Lock()
 		if node.msgLog.commitLog[commitMsg.Digest] == nil {
@@ -268,18 +264,13 @@ func (node *Node) handlePrepare(payload []byte, sig []byte) {
 		}
 		node.msgLog.commitLog[commitMsg.Digest][node.NodeID] = true
 		node.mutex.Unlock()
-		logBroadcastMsg(hCommit, commitMsg)
-		node.broadcast(sendMsg)
+		//logBroadcastMsg(hCommit, commitMsg)
+		node.broadcast(marshalMsg)
 	}
 }
 
-func (node *Node) handleCommit(payload []byte, sig []byte) {
-	var commitMsg CommitMsg
-	err := json.Unmarshal(payload, &commitMsg)
-	if err != nil {
-		fmt.Printf("error happened:%v", err)
-	}
-	logHandleMsg(hCommit, commitMsg, commitMsg.NodeID)
+func (node *Node) handleCommit(commitMsg *CommitMsg, sig []byte, clientNodeUrl string) {
+	//logHandleMsg(hCommit, commitMsg, commitMsg.NodeID)
 	//verify commitMsg's signature
 	msgPubKey := node.findNodePubkey(commitMsg.NodeID)
 	verify, err := verifySignatrue(commitMsg, sig, msgPubKey)
@@ -304,7 +295,7 @@ func (node *Node) handleCommit(payload []byte, sig []byte) {
 	}
 	node.msgLog.commitLog[commitMsg.Digest][commitMsg.NodeID] = true
 	node.mutex.Unlock()
-	// if receive commit msg >= 2f +1, then send reply msg to client
+	// if receive commit msg >= 2f +1, then Send reply msg to client
 	limit := node.countNeedReceiveMsgAmount()
 	sum, err := node.findVerifiedCommitMsgCount(commitMsg.Digest)
 	if err != nil {
@@ -312,14 +303,14 @@ func (node *Node) handleCommit(payload []byte, sig []byte) {
 		return
 	}
 	if sum >= limit {
-		// if already send reply msg, then do nothing
+		// if already Send reply msg, then do nothing
 		node.mutex.Lock()
 		exist := node.msgLog.replyLog[commitMsg.Digest]
 		node.mutex.Unlock()
 		if exist == true {
 			return
 		}
-		// send reply msg
+		// Send reply msg
 		node.mutex.Lock()
 		requestMsg := node.requestPool[commitMsg.Digest]
 		node.mutex.Unlock()
@@ -332,8 +323,8 @@ func (node *Node) handleCommit(payload []byte, sig []byte) {
 			node.NodeID,
 			done,
 		}
-		logBroadcastMsg(hReply, replyMsg)
-		send(ComposeMsg(hReply, replyMsg, []byte{}), node.clientNode.url)
+		//logBroadcastMsg(hReply, replyMsg)
+		Send(ComposeMsg(hReply, replyMsg, []byte{}), clientNodeUrl)
 		node.mutex.Lock()
 		node.msgLog.replyLog[commitMsg.Digest] = true
 		node.mutex.Unlock()
@@ -380,7 +371,7 @@ func (node *Node) findVerifiedCommitMsgCount(digest string) (int, error) {
 func (node *Node) broadcast(data []byte) {
 	for _, knownNode := range node.knownNodes {
 		if knownNode.nodeID != node.NodeID {
-			err := send(data, knownNode.url)
+			err := Send(data, knownNode.url)
 			if err != nil {
 				fmt.Printf("%v", err)
 			}
@@ -404,19 +395,6 @@ func (node *Node) signMessage(msg interface{}) ([]byte, error) {
 		return nil, err
 	}
 	return sig, nil
-}
-
-func send(data []byte, url string) error {
-	conn, err := net.Dial("tcp", url)
-	if err != nil {
-		return fmt.Errorf("%s is not online \n", url)
-	}
-	defer conn.Close()
-	_, err = io.Copy(conn, bytes.NewReader(data))
-	if err != nil {
-		return fmt.Errorf("%v\n", err)
-	}
-	return nil
 }
 
 func (node *Node) findPrimaryNode() int {

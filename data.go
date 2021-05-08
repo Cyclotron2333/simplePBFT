@@ -15,31 +15,42 @@ import (
 var (
 	privateKeys      []*rsa.PrivateKey
 	publicKeys       []*rsa.PublicKey
-	privateKeyClient *rsa.PrivateKey
-	publicKeyClient  *rsa.PublicKey
+	privateKeyClient []*rsa.PrivateKey
+	publicKeyClient  []*rsa.PublicKey
 	KnownNodes       []*KnownNode
-	KeypairMap       map[int]Keypair
-	ClientNode       *KnownNode
+	ClientNode       []*KnownNode
+	KnownKeypairMap  map[int]Keypair
+	ClientKeypairMap map[int]Keypair
 )
 
 func init() {
 	privateKeys = make([]*rsa.PrivateKey, NodeCount)
 	publicKeys = make([]*rsa.PublicKey, NodeCount)
+	privateKeyClient = make([]*rsa.PrivateKey, ClientCount)
+	publicKeyClient = make([]*rsa.PublicKey, ClientCount)
 	KnownNodes = make([]*KnownNode, NodeCount)
-	KeypairMap = make(map[int]Keypair)
+	ClientNode = make([]*KnownNode, ClientCount)
+	KnownKeypairMap = make(map[int]Keypair)
+	ClientKeypairMap = make(map[int]Keypair)
 
 	var err error
-	generateKeyFiles()
+	generateKeyFiles(NodeCount + ClientCount)
 	for i := 0; i < NodeCount; i++ {
 		privateKeys[i], publicKeys[i], err = getKeyPairByFile(i)
 		if err != nil {
 			panic(err)
 		}
 	}
-	privateKeyClient, publicKeyClient, err = getKeyPairByFile(NodeCount)
+	for i := 0; i < ClientCount; i++ {
+		privateKeyClient[i], publicKeyClient[i], err = getKeyPairByFile(i + NodeCount)
+		if err != nil {
+			panic(err)
+		}
+	}
 	if err != nil {
 		panic(err)
 	}
+	// 初始化服务端节点信息
 	for i := 0; i < NodeCount; i++ {
 		port := strconv.Itoa(8080 + i)
 		KnownNodes[i] = &KnownNode{
@@ -47,20 +58,23 @@ func init() {
 			url:    "localhost:" + port,
 			pubkey: publicKeys[i],
 		}
-		KeypairMap[i] = Keypair{
+		KnownKeypairMap[i] = Keypair{
 			privateKeys[i],
 			publicKeys[i],
 		}
 	}
-	KeypairMap[NodeCount] = Keypair{
-		privateKeyClient,
-		publicKeyClient,
-	}
-	port := strconv.Itoa(8080 + NodeCount)
-	ClientNode = &KnownNode{
-		NodeCount,
-		"localhost:" + port,
-		publicKeyClient,
+	// 初始化客户端节点信息
+	for i := 0; i < ClientCount; i++ {
+		port := strconv.Itoa(8080 + NodeCount + i)
+		ClientNode[i] = &KnownNode{
+			i,
+			"localhost:" + port,
+			publicKeyClient[i],
+		}
+		ClientKeypairMap[i] = Keypair{
+			privateKeyClient[i],
+			publicKeyClient[i],
+		}
 	}
 }
 
@@ -94,7 +108,7 @@ func getKeyPairByFile(nodeID int) (*rsa.PrivateKey, *rsa.PublicKey, error) {
 	return privkey, pubkey.(*rsa.PublicKey), nil
 }
 
-func generateKeyFiles() {
+func generateKeyFiles(length int) {
 	if !FileExists("./Keys") {
 		err := os.Mkdir("Keys", 0700)
 		if err != nil {
@@ -102,7 +116,7 @@ func generateKeyFiles() {
 		}
 	}
 
-	for i := 0; i <= NodeCount; i++ {
+	for i := 0; i < length; i++ {
 		filename, _ := filepath.Abs(fmt.Sprintf("./Keys/%d", i))
 		if !FileExists(filename+"_priv") && !FileExists(filename+"_pub") {
 			priv, pub := generateKeyPair()

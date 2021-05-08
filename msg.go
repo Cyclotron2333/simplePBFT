@@ -1,8 +1,11 @@
 package main
 
 import (
-	"encoding/json"
+	"bytes"
+	"crypto/rsa"
 	"fmt"
+	"io"
+	"net"
 	"reflect"
 )
 
@@ -28,6 +31,17 @@ type RequestMsg struct {
 	Timestamp int     `json:"timestamp"`
 	ClientID  int     `json:"clientID"`
 	CRequest  Request `json:"request"`
+}
+
+type NetMsg struct {
+	Header           HeaderMsg
+	Signature        []byte
+	ClientNodePubkey *rsa.PublicKey
+	ClientUrl        string
+	RequestMsg       *RequestMsg
+	PrePrepareMsg    *PrePrepareMsg
+	PrepareMsg       *PrepareMsg
+	CommitMsg        *CommitMsg
 }
 
 func (msg RequestMsg) String() string {
@@ -130,6 +144,19 @@ func ComposeMsg(header HeaderMsg, payload interface{}, sig []byte) []byte {
 	return res
 }
 
+func Send(data []byte, url string) error {
+	conn, err := net.Dial("tcp", url)
+	if err != nil {
+		return fmt.Errorf("%s is not online \n", url)
+	}
+	defer conn.Close()
+	_, err = io.Copy(conn, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("%v\n", err)
+	}
+	return nil
+}
+
 func SplitMsg(bmsg []byte) (HeaderMsg, []byte, []byte) {
 	var header HeaderMsg
 	var payload []byte
@@ -158,11 +185,11 @@ func printMsgLog(msg Msg) {
 }
 
 func logHandleMsg(header HeaderMsg, msg Msg, from int) {
-	//fmt.Printf("Receive %s msg from localhost:%d\n", header, nodeIdToPort(from))
-	//printMsgLog(msg)
+	fmt.Printf("Receive %s msg from localhost:%d\n", header, nodeIdToPort(from))
+	printMsgLog(msg)
 }
 
 func logBroadcastMsg(header HeaderMsg, msg Msg) {
-	//fmt.Printf("send/broadcast %s msg \n", header)
-	//printMsgLog(msg)
+	fmt.Printf("Send/broadcast %s msg \n", header)
+	printMsgLog(msg)
 }
