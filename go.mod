@@ -1,4 +1,4 @@
-module github.com/tn606024/simplePBFT
+module github.com/Cyclotron2333/simplePBFT
 
 go 1.15
 
